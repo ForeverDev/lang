@@ -4,17 +4,17 @@
 #include "const.h"
 
 typedef struct _vm {
-	s32 sp;	
+	s32 sp;
 	u32 ip;
 	u32 bp;
 	u32 funcs[S_FUNC];
 	u32 labels[S_LABEL];
-	s32 ram[S_RAM];
 	s32 stack[S_STACK];
+    s32 reg[S_REG];
 } VM;
 
 VM* VM_new();
-void VM_dumpStack(VM*);
+void VM_dumpStackAndReg(VM*);
 void VM_run(VM*, const s32*);
 void VM_runFromString(VM*, const char*);
 
@@ -25,13 +25,19 @@ VM* VM_new() {
 	vm->bp = 0;
 	memset(vm->funcs, 0, sizeof(vm->funcs));
 	memset(vm->labels, 0, sizeof(vm->labels));
+    memset(vm->reg, 0, sizeof(vm->reg));
 	return vm;
 }
 
-void VM_dumpStack(VM* vm) {
+void VM_dumpStackAndReg(VM* vm) {
+    printf("STACK:\n");
 	for (int i = 0; i <= vm->sp; i++) {
-		printf("%04d: %d\n", i, vm->stack[i]);
+		printf("%04d: 0x%04x\n", i, vm->stack[i]);
 	}
+    printf("REGISTERS:\n");
+    for (int i = 0; i < S_REG; i++) {
+        printf("%04d: 0x%04x\n", i, vm->reg[i]);
+    }
 }
 
 void VM_run(VM* vm, const s32* code) {
@@ -45,6 +51,13 @@ void VM_run(VM* vm, const s32* code) {
 			case 0x0a:
 				vm->labels[code[vm->ip++]] = vm->ip + 1;
 				break;
+            // if string const, skip over the string (it is null terminated)
+            case 0x15:
+                while (vm->labels[code[vm->ip]] != 0x00) {
+                    vm->ip++;
+                }
+                vm->ip++;
+                break;
 			default:
 				vm->ip += opcodes[opcode][1];
 				break;
@@ -98,9 +111,23 @@ void VM_run(VM* vm, const s32* code) {
 				break;
 			}
 			case 0x09:
-				printf("PRNT: %d\n", vm->stack[vm->sp--]);
+                switch(code[vm->ip++]) {
+                    // print int
+                    case 0x00:
+				        printf("%d", vm->stack[vm->sp--]);
+                        break;
+                    // print char
+                    case 0x01:
+                        printf("%c", vm->stack[vm->sp--]);
+                        break;
+                    // print newline
+                    case 0x02:
+                        printf("\n");
+                        break;
+                }
 				break;
 			case 0x0a:
+                vm->ip++;
 				break;
 			case 0x0b:
 				vm->ip = vm->labels[code[vm->ip++]];
@@ -114,13 +141,11 @@ void VM_run(VM* vm, const s32* code) {
 				break;
 			case 0x0d:
 				if (!vm->stack[vm->sp--]) {
-					vm->ip = vm->labels[code[vm->ip++]];		
+					vm->ip = vm->labels[code[vm->ip++]];
 				} else {
 					vm->ip++;
 				}
 				break;
-			// note that inequality comparisons return the opposite because of the
-			// order of the stack
 			case 0x0e:
 				vm->stack[++vm->sp] = vm->stack[vm->sp--] < vm->stack[vm->sp--];
 				break;
@@ -142,8 +167,32 @@ void VM_run(VM* vm, const s32* code) {
 			case 0x14:
 				vm->stack[++vm->sp] = vm->stack[vm->bp + code[vm->ip++]];
 				break;
+            // push the string backwards onto the stack so that the beginning of the string
+            // is on the very top
+            case 0x15: {
+                int forward = 0;
+                while (code[vm->ip + forward] != 0x00) {
+                    forward++;
+                }
+                for (int i = forward; i >= 0; i--) {
+                    vm->stack[++vm->sp] = code[vm->ip++];
+                }
+                break;
+            }
+            case 0x16:
+                vm->reg[code[vm->ip++]] = vm->stack[vm->sp--];
+                break;
+            case 0x17:
+                vm->stack[++vm->sp] = vm->reg[code[vm->ip++]];
+                break;
+            case 0x18:
+                vm->stack[++vm->sp] = vm->stack[vm->stack[vm->sp--]];
+                break;
+            case 0x19:
+                vm->stack[++vm->sp] = vm->sp;
+                break;
 			case 0xf0:
-				VM_dumpStack(vm);
+				VM_dumpStackAndReg(vm);
 				break;
 			case 0xf1:
 				printf("IP: %04d\n", vm->ip);
@@ -155,12 +204,12 @@ void VM_run(VM* vm, const s32* code) {
 				printf("SP: %04d\n", vm->sp);
 				break;
 			case 0xf4:
-				VM_dumpStack(vm);
-				printf("IP: %04d\n", vm->ip);
-				printf("BP: %04d\n", vm->bp);
-				printf("SP: %04d\n", vm->sp);
+				VM_dumpStackAndReg(vm);
+				printf("IP: 0x%04d\n", vm->ip);
+				printf("BP: 0x%04d\n", vm->bp);
+				printf("SP: 0x%04d\n", vm->sp);
 				break;
-		}	
+		}
 	}
 }
 
@@ -176,7 +225,7 @@ void VM_runFromString(VM* vm, const char* code) {
 			}
 			bufptr = 0;
 			memset(buf, 0, sizeof(buf));
-			generated_code[codeptr++] = (s32)strtol(hexa, NULL, 10);
+			generated_code[codeptr++] = (s32)strtol(hexa, NULL, 16);
 			free(hexa);
 			if (code[index] == '\0') {
 				break;
@@ -191,10 +240,43 @@ void VM_runFromString(VM* vm, const char* code) {
 
 int main(int argc, char** argv) {
 
-	VM* vm = VM_new();	
-	const char* code =  "05 00 01 01 20 -3 18 13 00 01 01 08 10 00 01 01 20 -3 03 07 00 01 20 -3 04 08 06 01 05 07 00 01 09 00";
+	VM* vm = VM_new();
+	const s32 code[] = {
 
-	VM_runFromString(vm, code);
+        0x05, 0x00,
+                0x14, -3,
+                0x16, 0x00,
+                0x0b, 0x01,
+            0x0a, 0x00,
+                0x17, 0x00,
+                0x18,
+                0x09, 0x01,
+            0x0a, 0x01,
+                0x17, 0x00,
+                0x01, 0x01,
+                0x02,
+                0x16, 0x00,
+                0x17, 0x00,
+                0x18,
+                0x01, 0x00,
+                0x12,
+                0x0d, 0x00,
+                0x09, 0x02,
+
+                0x08,
+        0x06,
+
+        0x15, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x00,
+        0x01, 0x07,
+        0x19,
+        0x03,
+        0x07, 0x00, 0x01,
+
+        0x00
+
+    };
+
+	VM_run(vm, code);
 
 	return 0;
 
